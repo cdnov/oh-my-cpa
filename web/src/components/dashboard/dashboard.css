@@ -542,6 +542,92 @@
   gap: 16px;
   min-width: 0;
 }
+.quota-row.has-carousel {
+  padding-block: 4px;
+}
+.quota-row-carousel {
+  grid-area: reading;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.quota-row-carousel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.quota-row-family-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.25;
+}
+.quota-row-carousel-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.quota-row-carousel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+.quota-row-carousel-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--fg);
+}
+.quota-row-carousel-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+.quota-row-carousel-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.quota-row-carousel-count {
+  color: var(--meta);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.quota-row-track {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none !important;
+  min-width: 0;
+}
+.quota-row-track::-webkit-scrollbar {
+  display: none !important;
+}
+.quota-row-slide {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+.quota-row-slide .quota-row-windows {
+  grid-area: auto;
+}
 .quota-window { display: grid; grid-template-columns: auto minmax(0, 1fr) 34px; align-items: center; gap: 8px; min-width: 0; }
 .quota-window.is-missing { display: block; color: var(--muted); font-size: var(--text-sm); }
 .quota-window-label { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--text-sm); }

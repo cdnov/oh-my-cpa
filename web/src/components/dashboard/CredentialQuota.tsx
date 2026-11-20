@@ -22,6 +22,7 @@ import {
   ExclamationCircleOutlined,
   HourglassOutlined,
   KeyOutlined,
+  LeftOutlined,
   RightOutlined,
 } from '../icons';
 import type { ManagementAuthFile } from '../../types/managementAuthFile';
@@ -43,6 +44,7 @@ import {
   quotaWindowPeriod,
   quotaWindowRemaining,
   resolveCredentialQuotaStatusDetail,
+  type CredentialQuotaFamily,
   type CredentialQuotaRow,
   type CredentialQuotaState,
   type QuotaWindowPeriod,
@@ -129,6 +131,110 @@ const QuotaWindowMeter: React.FC<{ window: QuotaWindow }> = ({ window }) => {
 
 const EmptyQuotaSlot: React.FC = () => <span className="quota-window is-missing" aria-hidden="true">—</span>;
 
+const QuotaFamilySlots: React.FC<{ slots: [QuotaWindow?, QuotaWindow?] }> = ({ slots }) => (
+  <span className="quota-row-windows">
+    {/* Both places are always drawn, so a credential without a five-hour limit leaves that
+        place empty instead of moving its weekly reading under everyone else's five hours. */}
+    {slots[0] ? <QuotaWindowMeter window={slots[0]} /> : <EmptyQuotaSlot />}
+    {slots[1] ? <QuotaWindowMeter window={slots[1]} /> : <EmptyQuotaSlot />}
+  </span>
+);
+
+/**
+ * Multi-family sliding strip: keeps the fixed two-slot width of one row and snaps one family per
+ * slide. Operators can swipe/scroll horizontally or step with the inline chevrons; keyboard focus
+ * on a hidden slide scrolls it into view automatically.
+ */
+const QuotaFamilyCarousel: React.FC<{
+  families: readonly CredentialQuotaFamily[];
+  activeIndex: number;
+  onActiveChange: (index: number) => void;
+}> = ({ families, activeIndex, onActiveChange }) => {
+  const t = useT();
+  const trackRef = React.useRef<HTMLDivElement>(null);
+  const clampedIndex = Math.max(0, Math.min(activeIndex, families.length - 1));
+  const activeFamily = families[clampedIndex];
+
+  const scrollToSlide = React.useCallback((nextIndex: number) => {
+    const bounded = Math.max(0, Math.min(nextIndex, families.length - 1));
+    onActiveChange(bounded);
+    const track = trackRef.current;
+    if (!track) return;
+    const width = track.clientWidth;
+    if (width > 0 && typeof track.scrollTo === 'function') {
+      track.scrollTo({ left: bounded * width, behavior: 'smooth' });
+    }
+  }, [families.length, onActiveChange]);
+
+  const handleScroll = React.useCallback(() => {
+    const track = trackRef.current;
+    if (!track || track.clientWidth <= 0) return;
+    const nearest = Math.round(track.scrollLeft / track.clientWidth);
+    const bounded = Math.max(0, Math.min(nearest, families.length - 1));
+    if (bounded !== clampedIndex) onActiveChange(bounded);
+  }, [clampedIndex, families.length, onActiveChange]);
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      scrollToSlide((clampedIndex + 1) % families.length);
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      scrollToSlide((clampedIndex - 1 + families.length) % families.length);
+    }
+  };
+
+  return (
+    <div
+      className="quota-row-carousel"
+      data-quota-family={activeFamily?.label || activeFamily?.key}
+      onKeyDown={handleKeyDown}
+    >
+      <div className="quota-row-carousel-head">
+        <span className="quota-row-family-name" data-tip={activeFamily?.label} data-tip-overflow="">
+          {activeFamily?.label ?? t('omc.quota_family_plan')}
+        </span>
+        <span className="quota-row-carousel-nav">
+          <button
+            type="button"
+            className="quota-row-carousel-btn"
+            aria-label={t('dash.quota.prev_group')}
+            disabled={clampedIndex <= 0}
+            onClick={() => scrollToSlide(clampedIndex - 1)}
+          >
+            <LeftOutlined aria-hidden="true" />
+          </button>
+          <span className="quota-row-carousel-count" aria-live="polite">
+            {clampedIndex + 1}/{families.length}
+          </span>
+          <button
+            type="button"
+            className="quota-row-carousel-btn"
+            aria-label={t('dash.quota.next_group')}
+            disabled={clampedIndex >= families.length - 1}
+            onClick={() => scrollToSlide(clampedIndex + 1)}
+          >
+            <RightOutlined aria-hidden="true" />
+          </button>
+        </span>
+      </div>
+      <div
+        ref={trackRef}
+        className="quota-row-track"
+        role="region"
+        aria-label={t('dash.quota.group_slider')}
+        onScroll={handleScroll}
+      >
+        {families.map((family) => (
+          <div key={family.key} className="quota-row-slide" data-quota-slide={family.label || family.key}>
+            <QuotaFamilySlots slots={family.slots} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 interface QuotaRowProps {
   row: CredentialQuotaRow;
   nowMS: number;
@@ -140,12 +246,23 @@ interface QuotaRowProps {
 
 const CredentialQuotaRowView: React.FC<QuotaRowProps> = ({ row, nowMS, pluginLogos, reorder, isPhone = false }) => {
   const t = useT();
+  const [familyIndex, setFamilyIndex] = React.useState(0);
+  const familySignature = row.families.map((family) => family.key).join('\0');
+  React.useEffect(() => {
+    setFamilyIndex(0);
+  }, [familySignature]);
+
   const status = STATUS_ROW_STATES[row.state];
   const statusDetail = status ? resolveCredentialQuotaStatusDetail(row, t) : undefined;
-  // A blocked row counts down to when it serves again; a serving one to when its tightest window
-  // refills. An instant the provider did not state exactly keeps its `~`.
-  const reset = row.bindingWindow?.reset_at_ms;
-  const isEstimated = !row.recoverAtMS && Boolean(row.bindingWindow?.reset_accuracy) && row.bindingWindow?.reset_accuracy !== 'exact';
+  const hasMultipleFamilies = row.families.length > 1;
+  const activeFamily = hasMultipleFamilies
+    ? row.families[Math.max(0, Math.min(familyIndex, row.families.length - 1))]
+    : undefined;
+  // A blocked row counts down to when it serves again; a serving one to when the visible family's
+  // tightest window refills. An instant the provider did not state exactly keeps its `~`.
+  const activeBinding = activeFamily?.bindingWindow ?? row.bindingWindow;
+  const reset = activeBinding?.reset_at_ms;
+  const isEstimated = !row.recoverAtMS && Boolean(activeBinding?.reset_accuracy) && activeBinding?.reset_accuracy !== 'exact';
   const until = formatTimeUntil(row.recoverAtMS ?? (status ? undefined : reset), nowMS, t);
   const when = until ? `${isEstimated ? '~' : ''}${until}` : '';
   return (
@@ -153,7 +270,7 @@ const CredentialQuotaRowView: React.FC<QuotaRowProps> = ({ row, nowMS, pluginLog
     // that was meant to move the list into leaving the page; the panel's one exit is its footer.
     <li
       {...reorder?.row}
-      className={clsx('quota-row', `is-${row.state}`, isCredentialQuotaBlocked(row.state) && 'is-blocked')}
+      className={clsx('quota-row', `is-${row.state}`, isCredentialQuotaBlocked(row.state) && 'is-blocked', hasMultipleFamilies && !status && 'has-carousel')}
       data-quota-state={row.state}
     >
       {reorder && !isPhone && <ReorderHandle {...reorder.handle} name={row.primary} />}
@@ -168,13 +285,14 @@ const CredentialQuotaRowView: React.FC<QuotaRowProps> = ({ row, nowMS, pluginLog
           <status.Icon className="quota-row-status-icon" aria-hidden="true" />
           {t(status.labelKey)}
         </span>
+      ) : hasMultipleFamilies ? (
+        <QuotaFamilyCarousel
+          families={row.families}
+          activeIndex={familyIndex}
+          onActiveChange={setFamilyIndex}
+        />
       ) : (
-        <span className="quota-row-windows">
-          {/* Both places are always drawn, so a credential without a five-hour limit leaves that
-              place empty instead of moving its weekly reading under everyone else's five hours. */}
-          {row.slots[0] ? <QuotaWindowMeter window={row.slots[0]} /> : <EmptyQuotaSlot />}
-          {row.slots[1] ? <QuotaWindowMeter window={row.slots[1]} /> : <EmptyQuotaSlot />}
-        </span>
+        <QuotaFamilySlots slots={row.slots} />
       )}
       <span className="quota-row-when">
         {when && (
