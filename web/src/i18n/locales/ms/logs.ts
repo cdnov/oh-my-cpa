@@ -220,6 +220,7 @@ export default {
   "audit.action.system.update.apply": "Meminta kemas kini",
   "audit.action.system.update.completed": "Kemas kini selesai",
   "audit.action.warmup.task.create": "Mencipta tugas pemanasan tetingkap",
+  "audit.action.warmup.task.batch_create": "Mencipta tugas pemanasan tetingkap secara kelompok",
   "audit.action.warmup.task.update": "Mengemas kini tugas pemanasan tetingkap",
   "audit.action.warmup.task.delete": "Memadam tugas pemanasan tetingkap",
   "audit.action.warmup.task.run": "Menjalankan pemanasan tetingkap",
