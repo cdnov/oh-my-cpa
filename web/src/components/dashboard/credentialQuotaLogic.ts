@@ -69,20 +69,30 @@ function familyOf(window: QuotaWindow): string {
   return window.scope === 'group' ? `group:${quotaWindowParts(window).group}` : window.scope === 'model' ? `model:${window.model || window.label}` : window.scope;
 }
 
-/**
- * The family a row reads - the credential's own plan when it publishes one, otherwise the first
- * family the provider reports - placed into its two fixed slots, short limit first. A slot the
- * credential has no limit for stays empty, so every row's five-hour reading sits under the one
- * above it whichever limits each credential reports. Per-model and side allowances belong to the
- * workspace's detail view.
- */
-function pickRowWindows(windows: QuotaWindow[]): [QuotaWindow?, QuotaWindow?] {
-  const first = windows.find((window) => window.scope === 'standard') ?? windows[0];
-  if (!first) return [];
-  const family = familyOf(first);
+/** One family's two fixed slots (short limit, then long limit) for a dashboard row. */
+export interface CredentialQuotaFamily {
+  key: string;
+  /** Group or model name for non-plan families; undefined for the credential's own plan. */
+  label?: string;
+  slots: [QuotaWindow?, QuotaWindow?];
+  bindingWindow?: QuotaWindow;
+  remainingPercent?: number;
+}
+
+function familyLabelOf(window: QuotaWindow): string | undefined {
+  if (window.scope === 'group') {
+    const group = quotaWindowParts(window).group ?? window.label;
+    return group.replace(/\s+models$/i, '').trim() || group;
+  }
+  if (window.scope === 'model') {
+    return (window.model || window.label).trim() || undefined;
+  }
+  return undefined;
+}
+
+function buildFamilySlots(candidates: QuotaWindow[]): [QuotaWindow?, QuotaWindow?] {
   const seenIds = new Set<string>();
-  const candidates = windows
-    .filter((window) => familyOf(window) === family)
+  const unique = candidates
     .filter((window) => {
       if (!window.id) return true;
       if (seenIds.has(window.id)) return false;
@@ -92,7 +102,7 @@ function pickRowWindows(windows: QuotaWindow[]): [QuotaWindow?, QuotaWindow?] {
     .sort((left, right) => PERIOD_ORDER.indexOf(quotaWindowPeriod(left)) - PERIOD_ORDER.indexOf(quotaWindowPeriod(right)));
   const slots: [QuotaWindow?, QuotaWindow?] = [];
   const unplaced: QuotaWindow[] = [];
-  for (const window of candidates) {
+  for (const window of unique) {
     const slot = slotOf(window);
     if (slot === undefined) unplaced.push(window);
     else if (!slots[slot]) slots[slot] = window;
@@ -102,6 +112,46 @@ function pickRowWindows(windows: QuotaWindow[]): [QuotaWindow?, QuotaWindow?] {
     else if (!slots[1]) slots[1] = window;
   }
   return slots;
+}
+
+/**
+ * Groups every reported quota window by family into fixed two-slot pages (short limit, then long
+ * limit), placing the credential's standard plan first (when present) and keeping source order for
+ * remaining families. Every family contributes to the credential's overall binding limit and state.
+ */
+function buildRowFamilies(windows: QuotaWindow[]): CredentialQuotaFamily[] {
+  if (windows.length === 0) return [];
+  const grouped = new Map<string, QuotaWindow[]>();
+  for (const window of windows) {
+    const key = familyOf(window);
+    const list = grouped.get(key);
+    if (list) list.push(window);
+    else grouped.set(key, [window]);
+  }
+  const orderedKeys = [...grouped.keys()].sort((left, right) => (
+    (left === 'standard' ? 0 : 1) - (right === 'standard' ? 0 : 1)
+  ));
+  return orderedKeys.map((key) => {
+    const groupWindows = grouped.get(key)!;
+    const slots = buildFamilySlots(groupWindows);
+    let bindingWindow: QuotaWindow | undefined;
+    let remainingPercent: number | undefined;
+    for (const window of slots) {
+      if (!window) continue;
+      const remaining = quotaWindowRemaining(window);
+      if (remaining != null && (remainingPercent == null || remaining < remainingPercent)) {
+        remainingPercent = remaining;
+        bindingWindow = window;
+      }
+    }
+    return {
+      key,
+      label: familyLabelOf(groupWindows[0]),
+      slots,
+      bindingWindow,
+      remainingPercent,
+    };
+  });
 }
 
 /**
@@ -132,9 +182,11 @@ export interface CredentialQuotaRow {
   /** The issuing portal over the credential family, so the row draws the brand that issued it. */
   credential: CredentialBrandIdentity;
   state: CredentialQuotaState;
-  /** The credential's own model family in two fixed places: the short limit, then the long one. */
+  /** The leading family's two fixed places: the short limit, then the long one. */
   slots: [QuotaWindow?, QuotaWindow?];
-  /** The tightest of `slots`, which is the limit that stops the credential first. */
+  /** Every quota family this credential reports, each as one 2-slot slide, most urgent first when a later family is tighter. */
+  families: CredentialQuotaFamily[];
+  /** The tightest limit across all families, which is the limit that stops the credential first. */
   bindingWindow?: QuotaWindow;
   remainingPercent?: number;
   /** When a blocked credential serves again, where the gateway or the provider stated it. */
@@ -238,17 +290,27 @@ export function buildCredentialQuotaBoard(
       continue;
     }
     const item = file.auth_index ? quotaByAuthIndex.get(file.auth_index) : undefined;
-    const slots = pickRowWindows(item?.windows ?? []);
-    const windows = slots.filter((window): window is QuotaWindow => window !== undefined);
+    const rawFamilies = buildRowFamilies(item?.windows ?? []);
+    // Surface the tightest family first whenever a non-first family is exhausted or low, so an
+    // operator sees the blocking group (e.g. Antigravity's Claude and GPT at 0%) without scrolling.
+    const families = [...rawFamilies];
+    let tightestIndex = 0;
     let bindingWindow: QuotaWindow | undefined;
     let remainingPercent: number | undefined;
-    for (const window of windows) {
-      const remaining = quotaWindowRemaining(window);
-      if (remaining != null && (remainingPercent == null || remaining < remainingPercent)) {
-        remainingPercent = remaining;
-        bindingWindow = window;
+    for (let index = 0; index < families.length; index += 1) {
+      const family = families[index];
+      if (family.remainingPercent != null && (remainingPercent == null || family.remainingPercent < remainingPercent)) {
+        remainingPercent = family.remainingPercent;
+        bindingWindow = family.bindingWindow;
+        tightestIndex = index;
       }
     }
+    if (tightestIndex > 0 && remainingPercent != null && remainingPercent < QUOTA_LOW_PERCENT) {
+      const [tightest] = families.splice(tightestIndex, 1);
+      families.unshift(tightest);
+    }
+    const slots: [QuotaWindow?, QuotaWindow?] = families[0]?.slots ?? [];
+    const allWindows = families.flatMap((family) => family.slots).filter((window): window is QuotaWindow => window !== undefined);
     const state = resolveState(file, item, remainingPercent);
     rows.push({
       key: file.auth_index || file.name,
@@ -257,9 +319,10 @@ export function buildCredentialQuotaBoard(
       credential: credentialBrandIdentity(credentialProviderFamily(file), file, multiPortalKeys),
       state,
       slots,
+      families,
       bindingWindow,
       remainingPercent,
-      recoverAtMS: resolveRecovery(state, item, windows),
+      recoverAtMS: resolveRecovery(state, item, allWindows),
       detail: (file.status_message || item?.error || '').trim() || undefined,
       recommendationStatus: item?.recommendation?.status,
       recommendationReason: item?.recommendation?.reason?.trim() || undefined,

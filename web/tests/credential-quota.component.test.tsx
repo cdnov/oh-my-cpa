@@ -140,6 +140,65 @@ describe('credential quota board', () => {
     // A gateway that reports no portal keeps the family's artwork.
     expect(buildCredentialQuotaBoard([file('plain', { type: 'harbor' })], []).rows[0].credential).toMatchObject({ provider: 'harbor' });
   });
+
+  it('scans all quota families, promotes an exhausted or low later family first, and slides between 2-slot family pages', () => {
+    const groupWindow = (
+      id: string,
+      group: string,
+      periodHours: number,
+      remaining: number,
+      resetInHours: number,
+    ): QuotaWindow => ({
+      id,
+      label: `${group} \u00b7 ${periodHours === 5 ? '5小时限制' : '每周限制'}`,
+      scope: 'group',
+      period_hours: periodHours,
+      remaining_percent: remaining,
+      reset_at_ms: NOW_MS + resetInHours * HOUR_MS,
+      reset_accuracy: 'exact',
+    });
+
+    const agExhausted = file('ag-ultra', { type: 'antigravity' });
+    const agWindows: QuotaWindow[] = [
+      groupWindow('ag_gemini_5h', 'Gemini Models', 5, 93, 1),
+      groupWindow('ag_gemini_week', 'Gemini Models', 168, 74, 120),
+      groupWindow('ag_claude_5h', 'Claude and GPT models', 5, 100, 4),
+      groupWindow('ag_claude_week', 'Claude and GPT models', 168, 0, 127),
+      groupWindow('ag_argon_week', 'Gemini 4 Argon', 168, 100, 160),
+    ];
+    const agBoard = buildCredentialQuotaBoard([agExhausted], [quota('ag-ultra', agWindows, { provider: 'antigravity', type: 'antigravity' })]);
+    const row = agBoard.rows[0];
+    // Exhausted Claude and GPT group drives the credential state, binding window, and recovery time.
+    expect(row.state).toBe('exhausted');
+    expect(row.remainingPercent).toBe(0);
+    expect(row.bindingWindow?.id).toBe('ag_claude_week');
+    expect(row.recoverAtMS).toBe(NOW_MS + 127 * HOUR_MS);
+    expect(row.families.map((family) => family.label)).toEqual(['Claude and GPT', 'Gemini', 'Gemini 4 Argon']);
+    expect(row.families[2].slots.map((entry) => entry?.id)).toEqual([undefined, 'ag_argon_week']);
+
+    // Multi-family row keeps two fixed slots per slide and lets the operator step across all groups.
+    const { unmount } = render(
+      <QuotaSurface
+        files={[agExhausted]}
+        quotas={[quota('ag-ultra', agWindows, { provider: 'antigravity', type: 'antigravity' })]}
+      />,
+    );
+    try {
+      const item = screen.getByRole('listitem');
+      expect(within(item).getByText('Claude and GPT')).toBeTruthy();
+      expect(within(item).getByText('1/3')).toBeTruthy();
+
+      fireEvent.click(within(item).getByRole('button', { name: 'Next quota group' }));
+      expect(within(item).getByText('Gemini')).toBeTruthy();
+      expect(within(item).getByText('2/3')).toBeTruthy();
+
+      fireEvent.click(within(item).getByRole('button', { name: 'Next quota group' }));
+      expect(within(item).getByText('Gemini 4 Argon')).toBeTruthy();
+      expect(within(item).getByText('3/3')).toBeTruthy();
+    } finally {
+      unmount();
+    }
+  });
 });
 
 describe('credential quota presentation', () => {
